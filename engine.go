@@ -98,23 +98,30 @@ func (engine *Engine) handle(ctx context.Context, tx *sql.Tx, message sqlmq.Mess
 		return time.Hour, err
 	}
 	msg.Data = data
-	if err := (&TCC{engine: engine, msg: msg}).handle(tx); err != nil {
+	if err := (&TCC{engine: engine, msg: msg}).confirmOrCancel(tx); err != nil {
+		if _, ok := err.(unmarshalError); ok {
+			return time.Hour, err
+		}
 		return retryAfter(int(msg.TryCount)), err
 	}
 	return 0, nil
 }
 
-func (engine *Engine) newAction(name string, b []byte) (Action, error) {
+type unmarshalError struct {
+	error
+}
+
+func (engine *Engine) unmarshalAction(name string, b []byte) (Action, error) {
 	engine.mutex.RLock()
 	action := engine.actions[name]
 	engine.mutex.RUnlock()
 
 	if action == nil {
-		return nil, fmt.Errorf("action %s is not registerd.", name)
+		return nil, unmarshalError{fmt.Errorf("action %s is not registerd.", name)}
 	}
 	actionPointer := reflect.New(reflect.TypeOf(action))
 	if err := json.Unmarshal(b, actionPointer.Interface()); err != nil {
-		return nil, err
+		return nil, unmarshalError{err}
 	}
 	return actionPointer.Elem().Interface().(Action), nil
 }

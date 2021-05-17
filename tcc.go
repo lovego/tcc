@@ -2,9 +2,10 @@ package tcc
 
 import (
 	"database/sql"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/lovego/sqlmq"
 )
@@ -21,73 +22,82 @@ type TCC struct {
 }
 
 type tccData struct {
-	Status     string `json:",omitempty"`
-	Concurrent bool   `json:",omitempty"` // do confirm or cancel concurrently or serially
-	Actions    []struct {
-		Name   string
-		Action json.RawMessage
-		action Action
-	} `json:",omitempty"`
+	Status     string      `json:",omitempty"`
+	Concurrent bool        `json:",omitempty"` // if should do confirm or cancel concurrently.
+	Actions    []tccAction `json:",omitempty"`
 }
 
 func (tcc *TCC) Try(action Action) error {
 	if err := tcc.engine.checkAction(action); err != nil {
 		return err
 	}
-
-	jsonAction, err := json.Marshal(action)
-	if err != nil {
+	if marshaledAction, err := marshalAction(action); err != nil {
 		return err
-	}
-	if err := tcc.update(`data = jsonb_set(data, '{Actions}'::text,
-		coalesce(data->'Actions', '[]'::jsonb) || ` + quote(string(jsonAction)) + `::jsonb
-	)`); err != nil {
+	} else if err := tcc.update(`data = jsonb_set(data, '{Actions}'::text,
+		coalesce(data->'Actions', '[]'::jsonb) || `+quote(string(marshaledAction))+`::jsonb
+	)`, statusTrying, nil); err != nil {
 		return err
 	}
 
 	return action.Try()
 }
 
-var confirm = fmt.Sprintf(`status = '%s', retry_at = now() `, statusConfirmed)
-var cancel = fmt.Sprintf(`status = '%s', retry_at = now() `, statusCanceled)
+var confirmSet = fmt.Sprintf(`status = '%s', retry_at = now() `, statusConfirmed)
+var cancelSet = fmt.Sprintf(`status = '%s', retry_at = now() `, statusCanceled)
 
 func (tcc *TCC) Confirm() error {
-	return tcc.update(confirm)
+	if err := tcc.update(confirmSet, statusTrying, nil); err != nil {
+		return err
+	}
+	tcc.engine.sqlmq.TriggerConsume()
+	return nil
 }
 
 func (tcc *TCC) Cancel() error {
-	return tcc.update(cancel)
+	if err := tcc.update(cancelSet, statusTrying, nil); err != nil {
+		return err
+	}
+	tcc.engine.sqlmq.TriggerConsume()
+	return nil
 }
 
-var updateCond = fmt.Sprintf(`queue = '%s' AND data->'Status' == to_jsonb('%s'::text)`, queueName, statusTrying)
-
-func (tcc *TCC) update(set string) error {
+func (tcc *TCC) update(set, assertStatus string, db sqlmq.DBOrTx) error {
 	if data := tcc.msg.Data.(*tccData); data.Status != statusTrying {
 		return fmt.Errorf("this tcc is aready %s, cann't Try again.", data.Status)
 	}
 
-	sql := fmt.Sprintf(`
+	updateSql := fmt.Sprintf(`
 	UPDATE %s
 	SET %s
-	WHERE id = %d AND %s
+	WHERE id = %d AND queue = '%s' AND data->'Status' == to_jsonb('%s'::text)
 	RETURNING id`,
 		tcc.engine.mqTableName,
 		set,
-		tcc.msg.Id, updateCond,
+		tcc.msg.Id, queueName, assertStatus,
 	)
+	if db == nil {
+		db = tcc.engine.sqlmq.DB
+	}
+	if result, err := db.Exec(updateSql); err != nil {
+		return err
+	} else if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n == 1 {
+		return nil
+	}
 
-	var tccId int64
-	if err := tcc.engine.sqlmq.DB.QueryRow(sql).Scan(&tccId); err != nil {
+	querySql := fmt.Sprintf(`
+	SELECT data->'Status'#>>'{}' as status
+	FROM %s
+	WHERE id = %d AND queue = '%s'`,
+		tcc.engine.mqTableName,
+		tcc.msg.Id, queueName,
+	)
+	var nowStatus string
+	if err := db.QueryRow(querySql).Scan(&nowStatus); err != nil {
 		return err
 	}
-	if tccId <= 0 || tccId != tcc.msg.Id {
-		return fmt.Errorf(`this TCC not exists or not in trying status.`)
-	}
-	return nil
-}
-
-func (tcc *TCC) handle(tx *sql.Tx) error {
-	return nil
+	return fmt.Errorf("this tcc is %s, not %s.", nowStatus, assertStatus)
 }
 
 // quote a string, removing all zero byte('\000') in it.
@@ -95,4 +105,96 @@ func quote(s string) string {
 	s = strings.Replace(s, "'", "''", -1)
 	s = strings.Replace(s, "\000", "", -1)
 	return "'" + s + "'"
+}
+
+func (tcc *TCC) confirmOrCancel(tx *sql.Tx) error {
+	data := tcc.msg.Data.(*tccData)
+	if data.Status != statusConfirmed && data.Status != statusCanceled {
+		// cancel tcc if trying timeout
+		data.Status = statusCanceled
+		if err := tcc.update(cancelSet, statusTrying, tx); err != nil {
+			return err
+		}
+	}
+
+	confirm := data.Status == statusConfirmed
+
+	if data.Concurrent {
+		if confirm {
+			return tcc.confirmConcurrently(data, tx)
+		} else {
+			return tcc.cancelConcurrently(data, tx)
+		}
+	} else {
+		if confirm {
+			return tcc.confirmSerially(data, tx)
+		} else {
+			return tcc.cancelSerially(data, tx)
+		}
+	}
+}
+
+func (tcc *TCC) confirmConcurrently(data *tccData, tx *sql.Tx) error {
+	var errs []string
+	var wg sync.WaitGroup
+	for i, action := range data.Actions {
+		if action.Status != statusConfirmed {
+			wg.Add(1)
+			go func(action tccAction, i int) {
+				if err := action.confirm(tcc, tx, i); err != nil {
+					errs = append(errs, action.Name+": "+err.Error())
+				}
+				wg.Done()
+			}(action, i)
+		}
+	}
+	wg.Wait()
+	if len(errs) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(errs, "; "))
+}
+
+func (tcc *TCC) cancelConcurrently(data *tccData, tx *sql.Tx) error {
+	var errs []string
+	var wg sync.WaitGroup
+	for i, action := range data.Actions {
+		if action.Status != statusCanceled {
+			wg.Add(1)
+			go func(action tccAction, i int) {
+				if err := action.cancel(tcc, tx, i); err != nil {
+					errs = append(errs, action.Name+": "+err.Error())
+				}
+				wg.Done()
+			}(action, i)
+		}
+	}
+	wg.Wait()
+	if len(errs) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(errs, "; "))
+}
+
+func (tcc *TCC) confirmSerially(data *tccData, tx *sql.Tx) error {
+	for i, action := range data.Actions {
+		if action.Status != statusConfirmed {
+			if err := action.confirm(tcc, tx, i); err != nil {
+				return errors.New(action.Name + ": " + err.Error())
+			}
+		}
+	}
+	return nil
+}
+
+func (tcc *TCC) cancelSerially(data *tccData, tx *sql.Tx) error {
+	for i := len(data.Actions) - 1; i >= 0; i-- {
+		action := data.Actions[i]
+		if action.Status != statusCanceled {
+			if err := action.cancel(tcc, tx, i); err != nil {
+				return errors.New(action.Name + ": " + err.Error())
+			}
+		}
+	}
+	return nil
 }
