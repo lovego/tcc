@@ -29,7 +29,7 @@ type Action interface {
 
 const queueName = "tccTransaction"
 
-func New(mq *sqlmq.SqlMQ) *Engine {
+func NewEngine(mq *sqlmq.SqlMQ) *Engine {
 	stdTable := mq.Table.(*sqlmq.StdTable)
 	engine := &Engine{sqlmq: mq, mqTableName: stdTable.Name(), actions: make(map[string]Action)}
 	mq.Register(queueName, engine.handle)
@@ -71,6 +71,22 @@ func (engine *Engine) New(timeout time.Duration, concurrent bool) (*TCC, error) 
 	return &TCC{engine: engine, msg: msg}, nil
 }
 
+func (engine *Engine) Run(timeout time.Duration, concurrent bool, actions ...Action) error {
+	tcc, err := engine.New(timeout, concurrent)
+	if err != nil {
+		return err
+	}
+	for _, action := range actions {
+		if err := tcc.Try(action); err != nil {
+			if err2 := tcc.Cancel(); err2 != nil {
+				engine.sqlmq.Logger.Error(err2)
+			}
+			return err
+		}
+	}
+	return tcc.Confirm()
+}
+
 func (engine *Engine) checkAction(tried Action) error {
 	name := tried.Name()
 	engine.mutex.RLock()
@@ -90,21 +106,24 @@ func (engine *Engine) checkAction(tried Action) error {
 }
 
 func (engine *Engine) handle(ctx context.Context, tx *sql.Tx, message sqlmq.Message) (
-	time.Duration, error,
+	time.Duration, bool, error,
 ) {
 	msg := message.(*sqlmq.StdMessage)
 	data := &tccData{}
 	if err := json.Unmarshal(msg.Data.([]byte), &data); err != nil {
-		return time.Hour, err
+		return time.Hour, true, err
 	}
 	msg.Data = data
-	if err := (&TCC{engine: engine, msg: msg}).confirmOrCancel(tx); err != nil {
+	if canCommit, err := (&TCC{engine: engine, msg: msg}).confirmOrCancel(tx); err != nil {
+		var retryAfter time.Duration
 		if _, ok := err.(unmarshalError); ok {
-			return time.Hour, err
+			retryAfter = time.Hour
+		} else {
+			retryAfter = getRetryAfter(int(msg.TryCount))
 		}
-		return retryAfter(int(msg.TryCount)), err
+		return retryAfter, canCommit, err
 	}
-	return 0, nil
+	return 0, true, nil
 }
 
 type unmarshalError struct {
@@ -133,7 +152,7 @@ var retryPeriods = []time.Duration{
 	time.Hour,
 }
 
-func retryAfter(tryCount int) time.Duration {
+func getRetryAfter(tryCount int) time.Duration {
 	if tryCount >= len(retryPeriods) {
 		tryCount = len(retryPeriods) - 1
 	}

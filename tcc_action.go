@@ -23,29 +23,29 @@ func marshalAction(action Action) ([]byte, error) {
 	})
 }
 
-func (ta tccAction) confirm(tcc *TCC, tx *sql.Tx, actionIndex int) error {
+func (ta tccAction) confirm(tcc *TCC, tx *sql.Tx, actionIndex int) (bool, error) {
 	action, err := tcc.engine.unmarshalAction(ta.Name, ta.Raw)
 	if err != nil {
-		return err
+		return true, err
 	}
 	if err := action.Confirm(); err != nil {
-		return err
+		return true, err
 	}
 	return setActionStatus(tcc, tx, actionIndex, statusConfirmed)
 }
 
-func (ta tccAction) cancel(tcc *TCC, tx *sql.Tx, actionIndex int) error {
+func (ta tccAction) cancel(tcc *TCC, tx *sql.Tx, actionIndex int) (bool, error) {
 	action, err := tcc.engine.unmarshalAction(ta.Name, ta.Raw)
 	if err != nil {
-		return err
+		return true, err
 	}
 	if err := action.Cancel(); err != nil {
-		return err
+		return true, err
 	}
 	return setActionStatus(tcc, tx, actionIndex, statusCanceled)
 }
 
-func setActionStatus(tcc *TCC, tx *sql.Tx, actionIndex int, status string) error {
+func setActionStatus(tcc *TCC, tx *sql.Tx, actionIndex int, status string) (bool, error) {
 	setSql := fmt.Sprintf(
 		`data = jsonb_set(data, '{Actions,%d,Status}'::text[], to_jsonb('%s'::text))`,
 		actionIndex, status,
