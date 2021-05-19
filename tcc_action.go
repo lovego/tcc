@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type tccAction struct {
@@ -23,32 +24,35 @@ func marshalAction(action Action) ([]byte, error) {
 	})
 }
 
-func (ta tccAction) confirm(tcc *TCC, tx *sql.Tx, actionIndex int) (bool, error) {
+func (ta tccAction) confirm(tcc *TCC, tx *sql.Tx, actionIndex int) (time.Duration, bool, error) {
 	action, err := tcc.engine.unmarshalAction(ta.Name, ta.Raw)
 	if err != nil {
-		return true, err
+		return time.Hour, true, err
 	}
 	if err := action.Confirm(); err != nil {
-		return true, err
+		return 0, true, err
 	}
-	return setActionStatus(tcc, tx, actionIndex, statusConfirmed)
+	return setActionStatus(tcc, tx, actionIndex, statusConfirmed, "confirm action")
 }
 
-func (ta tccAction) cancel(tcc *TCC, tx *sql.Tx, actionIndex int) (bool, error) {
+func (ta tccAction) cancel(tcc *TCC, tx *sql.Tx, actionIndex int) (time.Duration, bool, error) {
 	action, err := tcc.engine.unmarshalAction(ta.Name, ta.Raw)
 	if err != nil {
-		return true, err
+		return time.Hour, true, err
 	}
 	if err := action.Cancel(); err != nil {
-		return true, err
+		return 0, true, err
 	}
-	return setActionStatus(tcc, tx, actionIndex, statusCanceled)
+	return setActionStatus(tcc, tx, actionIndex, statusCanceled, "cancel action")
 }
 
-func setActionStatus(tcc *TCC, tx *sql.Tx, actionIndex int, status string) (bool, error) {
+func setActionStatus(
+	tcc *TCC, tx *sql.Tx, actionIndex int, status, method string,
+) (time.Duration, bool, error) {
 	setSql := fmt.Sprintf(
 		`data = jsonb_set(data, '{Actions,%d,Status}'::text[], to_jsonb('%s'::text))`,
 		actionIndex, status,
 	)
-	return tcc.update(setSql, status, tx)
+	canCommit, err := tcc.update(setSql, status, method, tx)
+	return 0, canCommit, err
 }

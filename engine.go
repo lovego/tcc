@@ -15,6 +15,7 @@ import (
 
 type Engine struct {
 	sqlmq       *sqlmq.SqlMQ
+	mqName      string
 	mqTableName string
 	actions     map[string]Action
 	mutex       sync.RWMutex
@@ -27,12 +28,18 @@ type Action interface {
 	Cancel() error
 }
 
-const queueName = "tccTransaction"
-
-func NewEngine(mq *sqlmq.SqlMQ) *Engine {
+// name must be unique for the same mq.
+func NewEngine(name string, mq *sqlmq.SqlMQ) *Engine {
 	stdTable := mq.Table.(*sqlmq.StdTable)
-	engine := &Engine{sqlmq: mq, mqTableName: stdTable.Name(), actions: make(map[string]Action)}
-	mq.Register(queueName, engine.handle)
+	engine := &Engine{
+		sqlmq:       mq,
+		mqName:      "tcc-" + name,
+		mqTableName: stdTable.Name(),
+		actions:     make(map[string]Action),
+	}
+	if err := mq.Register(engine.mqName, engine.handle); err != nil {
+		panic(time.Now().Format(time.RFC3339Nano) + " " + err.Error())
+	}
 	return engine
 }
 
@@ -41,7 +48,7 @@ func (engine *Engine) Register(actions ...Action) {
 	defer engine.mutex.Unlock()
 	for _, action := range actions {
 		if name := action.Name(); engine.actions[name] != nil {
-			panic(time.Now().Format(time.RFC3339Nano) + " action " + name + " aready registered.")
+			panic(time.Now().Format(time.RFC3339Nano) + " action " + name + " aready registered")
 		} else {
 			engine.actions[name] = action
 		}
@@ -54,7 +61,7 @@ func (engine *Engine) New(timeout time.Duration, concurrent bool) (*TCC, error) 
 	now := time.Now()
 
 	msg := &sqlmq.StdMessage{
-		Queue: queueName,
+		Queue: engine.mqName,
 		Data: &tccData{
 			Status:     statusTrying,
 			Concurrent: concurrent,
@@ -94,11 +101,11 @@ func (engine *Engine) checkAction(tried Action) error {
 	engine.mutex.RUnlock()
 
 	if registered == nil {
-		return fmt.Errorf("action %s is not registerd.", name)
+		return fmt.Errorf("action %s is not registered", name)
 	}
 	if reflect.TypeOf(registered) != reflect.TypeOf(tried) {
 		return fmt.Errorf(
-			`action %s has been "Register"ed with type "%T", but "Try"ed with type "%T"`,
+			`action %s has been registered with type "%T", but tried with type "%T"`,
 			name, registered, tried,
 		)
 	}
@@ -114,11 +121,8 @@ func (engine *Engine) handle(ctx context.Context, tx *sql.Tx, message sqlmq.Mess
 		return time.Hour, true, err
 	}
 	msg.Data = data
-	if canCommit, err := (&TCC{engine: engine, msg: msg}).confirmOrCancel(tx); err != nil {
-		var retryAfter time.Duration
-		if _, ok := err.(unmarshalError); ok {
-			retryAfter = time.Hour
-		} else {
+	if retryAfter, canCommit, err := (&TCC{engine: engine, msg: msg}).confirmOrCancel(tx); err != nil {
+		if retryAfter <= 0 {
 			retryAfter = getRetryAfter(int(msg.TryCount))
 		}
 		return retryAfter, canCommit, err
@@ -126,9 +130,7 @@ func (engine *Engine) handle(ctx context.Context, tx *sql.Tx, message sqlmq.Mess
 	return 0, true, nil
 }
 
-type unmarshalError struct {
-	error
-}
+var errActionNotRegistered = errors.New("action not registerd")
 
 func (engine *Engine) unmarshalAction(name string, b []byte) (Action, error) {
 	engine.mutex.RLock()
@@ -136,11 +138,11 @@ func (engine *Engine) unmarshalAction(name string, b []byte) (Action, error) {
 	engine.mutex.RUnlock()
 
 	if action == nil {
-		return nil, unmarshalError{fmt.Errorf("action %s is not registerd.", name)}
+		return nil, errActionNotRegistered
 	}
 	actionPointer := reflect.New(reflect.TypeOf(action))
 	if err := json.Unmarshal(b, actionPointer.Interface()); err != nil {
-		return nil, unmarshalError{err}
+		return nil, err
 	}
 	return actionPointer.Elem().Interface().(Action), nil
 }
