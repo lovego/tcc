@@ -16,7 +16,7 @@ func ExampleNewEngine() {
 	}()
 	NewEngine("test", testMQ)
 	// Output:
-	// queue tcc-test aready registered
+	// queue tcc-test already registered
 }
 
 func ExampleEngine_Register() {
@@ -25,7 +25,7 @@ func ExampleEngine_Register() {
 	}()
 	tccEngine.Register(testAction1{})
 	// Output:
-	// action action1 aready registered
+	// action action1 already registered
 }
 
 func ExampleEngine_New() {
@@ -59,9 +59,9 @@ func ExampleEngine_handle() {
 	}))
 	// Output:
 	// 1h0m0s true unexpected end of JSON input
-	// 1h0m0s true test-action: action not registerd
+	// 1h0m0s true test-action: action not registered
 	// 1h0m0s true action1: json: cannot unmarshal number into Go value of type tcc.testAction1
-	// 1h0m0s true test-action: action not registerd
+	// 1h0m0s true test-action: action not registered
 	// 1h0m0s true action1: json: cannot unmarshal number into Go value of type tcc.testAction1
 }
 func ExampleGetRetryAfter() {

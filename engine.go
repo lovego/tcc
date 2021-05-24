@@ -48,7 +48,7 @@ func (engine *Engine) Register(actions ...Action) {
 	defer engine.mutex.Unlock()
 	for _, action := range actions {
 		if name := action.Name(); engine.actions[name] != nil {
-			panic(time.Now().Format(time.RFC3339Nano) + " action " + name + " aready registered")
+			panic(time.Now().Format(time.RFC3339Nano) + " action " + name + " already registered")
 		} else {
 			engine.actions[name] = action
 		}
@@ -130,7 +130,7 @@ func (engine *Engine) handle(ctx context.Context, tx *sql.Tx, message sqlmq.Mess
 	return 0, true, nil
 }
 
-var errActionNotRegistered = errors.New("action not registerd")
+var errActionNotRegistered = errors.New("action not registered")
 
 func (engine *Engine) unmarshalAction(name string, b []byte) (Action, error) {
 	engine.mutex.RLock()
