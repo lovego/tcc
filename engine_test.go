@@ -51,8 +51,16 @@ func ExampleEngine_handle() {
 	fmt.Println(tccEngine.handle(nil, nil, &sqlmq.StdMessage{
 		Data: []byte(`{"Status": "canceled", "Actions":[{"Name":"action1","Raw":1}]}`),
 	}))
+	fmt.Println(tccEngine.handle(nil, nil, &sqlmq.StdMessage{
+		Data: []byte(`{"Status": "confirmed", "Concurrent": true, "Actions":[{"Name":"test-action"}]}`),
+	}))
+	fmt.Println(tccEngine.handle(nil, nil, &sqlmq.StdMessage{
+		Data: []byte(`{"Status": "canceled", "Concurrent": true, "Actions":[{"Name":"action1","Raw":1}]}`),
+	}))
 	// Output:
 	// 1h0m0s true unexpected end of JSON input
+	// 1h0m0s true test-action: action not registerd
+	// 1h0m0s true action1: json: cannot unmarshal number into Go value of type tcc.testAction1
 	// 1h0m0s true test-action: action not registerd
 	// 1h0m0s true action1: json: cannot unmarshal number into Go value of type tcc.testAction1
 }

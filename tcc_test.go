@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/lovego/sqlmq"
 )
 
 func ExampleTCC_Try() {
@@ -49,6 +51,16 @@ func ExampleTCC_Cancel() {
 	// tcc(1) is confirmed, cann't Cancel
 }
 
+func ExampleTCC_update() {
+	tcc, err := tccEngine.New(time.Minute, false)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(tcc.update("", statusTrying, "xx", testDB))
+	// Output:
+	// false pq: syntax error at or near "WHERE"
+}
+
 var tccId = regexp.MustCompile(`^tcc\(\d+\)`)
 
 func ExampleTCC_statusError() {
@@ -58,6 +70,22 @@ func ExampleTCC_statusError() {
 	}
 	canCommit, err := tcc.statusError("confirm action", testDB)
 	fmt.Println(canCommit, tccId.ReplaceAllString(err.Error(), "tcc(1)"))
+
+	db := getDB()
+	db.Close()
+
+	fmt.Println(tcc.statusError("confirm action", db))
 	// Output:
 	// true tcc(1) is trying, cann't confirm action
+	// false sql: database is closed
+}
+
+func ExampleTCC_confirmOrCancel() {
+	tx, err := testDB.Begin()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println((&TCC{msg: &sqlmq.StdMessage{Data: &tccData{}}}).confirmOrCancel(tx))
+	// Output:
+	// 0s true tcc(0) is canceled, cann't Cancel
 }

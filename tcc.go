@@ -52,7 +52,7 @@ func (tcc *TCC) Confirm() error {
 		return err
 	}
 	tcc.msg.Data.(*tccData).Status = statusConfirmed
-	tcc.engine.sqlmq.TriggerConsume()
+	tcc.engine.sqlmq.NotifyConsumeAt(time.Now(), "tcc.Confirm")
 	return nil
 }
 
@@ -61,7 +61,7 @@ func (tcc *TCC) Cancel() error {
 		return err
 	}
 	tcc.msg.Data.(*tccData).Status = statusCanceled
-	tcc.engine.sqlmq.TriggerConsume()
+	tcc.engine.sqlmq.NotifyConsumeAt(time.Now(), "tcc.Cancel")
 	return nil
 }
 
