@@ -64,20 +64,6 @@ func ExampleEngine_handle() {
 	// 1h0m0s true test-action: action not registered
 	// 1h0m0s true action1: json: cannot unmarshal number into Go value of type tcc.testAction1
 }
-func ExampleGetRetryAfter() {
-	fmt.Println(getRetryAfter(0))
-	fmt.Println(getRetryAfter(1))
-	fmt.Println(getRetryAfter(2))
-	fmt.Println(getRetryAfter(3))
-	fmt.Println(getRetryAfter(4))
-
-	// Output:
-	// 3s
-	// 30s
-	// 5m0s
-	// 1h0m0s
-	// 1h0m0s
-}
 
 type testAction struct {
 }

@@ -123,7 +123,7 @@ func (engine *Engine) handle(ctx context.Context, tx *sql.Tx, message sqlmq.Mess
 	msg.Data = data
 	if retryAfter, canCommit, err := (&TCC{engine: engine, msg: msg}).confirmOrCancel(tx); err != nil {
 		if retryAfter <= 0 {
-			retryAfter = getRetryAfter(int(msg.TryCount))
+			retryAfter = sqlmq.GetRetryWait(msg.TriedCount)
 		}
 		return retryAfter, canCommit, err
 	}
@@ -145,18 +145,4 @@ func (engine *Engine) unmarshalAction(name string, b []byte) (Action, error) {
 		return nil, err
 	}
 	return actionPointer.Elem().Interface().(Action), nil
-}
-
-var retryPeriods = []time.Duration{
-	3 * time.Second,
-	30 * time.Second,
-	300 * time.Second,
-	time.Hour,
-}
-
-func getRetryAfter(tryCount int) time.Duration {
-	if tryCount >= len(retryPeriods) {
-		tryCount = len(retryPeriods) - 1
-	}
-	return retryPeriods[tryCount]
 }
